@@ -1,0 +1,312 @@
+using Azure.Core;
+using Azure.Identity;
+using Azure.Security.KeyVault.Secrets;
+using Microsoft.SharePoint.Client;
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.IO;
+using System.Text;
+using Microsoft.SharePoint;
+using System.Web;
+using SharepointCommon;
+using AuthenticationManager = PnP.Framework.AuthenticationManager;
+
+namespace TSS.HRAutomation.StaffSyncFromWD
+{
+    class Helper
+    {
+        public static void uploadLog(ClientContext spContext, string library, string path, string name)
+        {
+            Web HRWeb = spContext.Web;
+            List wfRequestList = HRWeb.GetListByUrl(library);
+            spContext.Load(wfRequestList);
+            spContext.ExecuteQuery();
+
+            System.IO.FileStream fs = System.IO.File.OpenRead(path + name);
+
+            FileCreationInformation fileCreateInfo = new FileCreationInformation();
+            fileCreateInfo.Url = name;
+            fileCreateInfo.ContentStream = fs;
+            fileCreateInfo.Overwrite = true;
+
+            wfRequestList.RootFolder.Files.Add(fileCreateInfo);
+            spContext.ExecuteQuery();
+        }
+
+        public static DataTable getTableFromTXT(string path, string[] columns)
+        {
+            try
+            {
+                StreamReader sr = new StreamReader(path, Encoding.Default);
+                String rowData;
+                DataTable wdTable = new DataTable();
+                for (int i = 0; i < columns.Length; i++)
+                {
+                    wdTable.Columns.Add(columns[i]);
+                }
+
+                while ((rowData = sr.ReadLine()) != null)
+                {
+                    DataRow staff = wdTable.NewRow();
+                    string[] lines = rowData.Split('\t');
+                    for (int i = 0; i < columns.Length; i++)
+                    {
+                        staff[columns[i]] = lines[i];
+                    }
+                    wdTable.Rows.Add(staff);
+                }
+                return wdTable;
+            }
+            catch (Exception ex)
+            {
+                return null;
+
+            }
+        }
+
+        public static ClientContext GetAppCtx(string siteUrl, string appId, string appSecret)
+        {
+            try
+            {
+                AuthenticationManager repositoryAuthenticationManager = new AuthenticationManager();
+                ClientContext ctx = repositoryAuthenticationManager.GetACSAppOnlyContext(siteUrl, appId, appSecret);
+                return ctx;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        public static void UploadFile(ClientContext context, string targetFolder, string fileName, string filePath)
+        {
+            System.IO.FileInfo myfile = new System.IO.FileInfo(filePath);
+            byte[] fileArray = new byte[int.Parse(myfile.Length.ToString())];
+            FileStream fs = System.IO.File.OpenRead(filePath);
+            int n = fs.Read(fileArray, 0, int.Parse(myfile.Length.ToString()));
+
+
+            Web web = context.Web;
+
+            Folder docSetFolder = web.GetFolderByServerRelativeUrl(targetFolder);
+            context.Load(docSetFolder);
+            context.ExecuteQuery();
+            string documentUrl = targetFolder + "/" + fileName;
+            FileCreationInformation fci = new FileCreationInformation();
+            fci.Url = documentUrl;
+            fci.Content = fileArray; //byte[] take your stream and convert to byte array
+            //get the folder's file collection
+            FileCollection documentFiles = docSetFolder.Files;
+            context.Load(documentFiles);
+            context.ExecuteQuery();
+            Microsoft.SharePoint.Client.File newFile = documentFiles.Add(fci);
+            context.Load(newFile);
+            ListItem item = newFile.ListItemAllFields;
+            context.Load(item);
+
+            item.Update();
+            context.ExecuteQuery();
+
+
+
+        }
+
+
+        public static DataTable runSQLCommand(string SQLText, string SQLConn, SqlParameter[] sqlParameters, params string[] logPath)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(SQLConn))
+                {
+                    conn.Open();
+                    using (SqlCommand cmd = conn.CreateCommand())
+                    {
+                        SqlCommand sqlCommand = new SqlCommand(SQLText, conn);
+                        if (sqlParameters != null)
+                            sqlCommand.Parameters.AddRange(sqlParameters);
+
+                        SqlDataAdapter adapter = new SqlDataAdapter(sqlCommand);
+                        DataTable table = new DataTable();
+                        adapter.Fill(table);
+                        return table;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                writeLogs("error message is " + ex.Message.ToString(), logPath.Length == 0 ? "C:\\HRAutomationJob\\Logs\\" + "ERROR" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".txt" : logPath[0].ToString());
+                return null;
+            }
+        }
+
+        public static DataTable runStorageProcess(string SPName, string SQLConn, SqlParameter[] sqlParameters, params string[] logPath)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(SQLConn))
+                {
+                    SqlCommand sqlCommand = new SqlCommand(SPName, conn);
+                    DataTable table = new DataTable();
+                    try
+                    {
+                        conn.Open();
+                        sqlCommand.CommandType = CommandType.StoredProcedure;
+                        sqlCommand.Transaction = conn.BeginTransaction();
+                        if (sqlParameters != null)
+                            sqlCommand.Parameters.AddRange(sqlParameters);
+
+                        SqlDataAdapter adapter = new SqlDataAdapter(sqlCommand);
+                        adapter.Fill(table);
+                        sqlCommand.Transaction.Commit();
+                        // writeLogs("table is " +table.Rows[0]["return_code"], "C:\\HRAutomationJob\\Logs\\"+ "SyncCheckInToPMALog" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".txt");
+
+
+
+                    }
+                    catch (Exception ex)
+                    {
+                        table = null;
+
+                        writeLogs("error message is " + ex.Message.ToString(), logPath.Length == 0 ? "C:\\HRAutomationJob\\Logs\\" + "ERROR" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".txt" : logPath[0].ToString());
+                        Console.WriteLine(ex.Message.ToString());
+                        if (sqlCommand.Transaction != null)
+                        {
+                            sqlCommand.Transaction.Rollback();
+                        }
+
+
+
+
+                    }
+                    return table;
+                }
+            }
+            catch (Exception ex)
+            {
+                return null;
+            }
+        }
+
+        public static void writeLogs(string LogMesg, string LogSrc)
+        {
+            Console.WriteLine(LogMesg);
+            StreamWriter writer = null;
+            string sCurDate = System.DateTime.Now.ToString("yyyy-MM-dd");
+            try
+            {
+                if (System.IO.File.Exists(LogSrc))
+                    writer = new StreamWriter(LogSrc, true, System.Text.Encoding.GetEncoding("UTF-8"));
+                else
+                    writer = new StreamWriter(LogSrc, false, System.Text.Encoding.GetEncoding("UTF-8"));
+                string sDateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:sss");
+                writer.WriteLine("<" + sDateTime + "> " + " " + LogMesg);
+            }
+            catch { }
+            finally
+            {
+                if (writer != null)
+                    writer.Close();
+            }
+        }
+
+        public static bool IsNotNullOrEmpty(object obj)
+        {
+
+            if (obj != null && obj.ToString() != "")
+            {
+                return true;
+            }
+
+            return false;
+
+        }
+        public static string GetAKVSecret(string keyVaultName, string secretName)
+        {
+            try
+            {
+                var kvUri = "https://" + keyVaultName + ".vault.azure.net";
+                SecretClientOptions options = new SecretClientOptions()
+                {
+                    Retry =
+                    {
+                        Delay= TimeSpan.FromSeconds(2),
+                        MaxDelay = TimeSpan.FromSeconds(16),
+                        MaxRetries = 5,
+                        Mode = RetryMode.Exponential
+                    }
+                };
+
+                var client = new SecretClient(new Uri(kvUri), new DefaultAzureCredential(), options);
+                KeyVaultSecret secret = client.GetSecret(secretName);
+                Console.WriteLine(secretName);
+                Console.WriteLine(secret.Value);
+                return secret.Value;
+            }
+            catch (Exception)
+            {
+                return "";
+            }
+        }
+
+        public static DataTable ImportToTable(string filePath)
+        {
+            try
+            {
+                Encoding encoding = Encoding.ASCII;
+                DataTable dt = new DataTable();
+                FileStream fs = new FileStream(filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read);
+
+                StreamReader sr = new StreamReader(fs, encoding);
+                string strLine = "";
+                string[] aryLine = null;
+                string[] tableHead = null;
+                int columnCount = 0;
+                bool IsFirst = true;
+                while ((strLine = sr.ReadLine()) != null)
+                {
+                    if (IsFirst == true)
+                    {
+                        tableHead = strLine.Split(',');
+                        IsFirst = false;
+                        columnCount = tableHead.Length;
+                        //create column
+                        for (int i = 0; i < columnCount; i++)
+                        {
+                            DataColumn dc = new DataColumn(tableHead[i]);
+                            dt.Columns.Add(dc);
+                        }
+                    }
+                    else
+                    {
+                        aryLine = strLine.Split(',');
+                        DataRow dr = dt.NewRow();
+                        try
+                        {
+                            for (int j = 0; j < columnCount; j++)
+                            {
+
+                                dr[j] = aryLine[j];
+                            }
+                        }
+                        catch
+                        {
+                        }
+                        dt.Rows.Add(dr);
+                    }
+                }
+                if (aryLine != null && aryLine.Length > 0)
+                {
+                    dt.DefaultView.Sort = tableHead[0] + " " + "asc";
+                }
+
+                sr.Close();
+                fs.Close();
+                return dt;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+}
